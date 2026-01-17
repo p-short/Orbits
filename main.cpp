@@ -222,9 +222,39 @@ void ClampValue(float& value, float min, float max) {
 
 float t = 0.f;
 
+// Four-channel sawtooth wave generator.
+int myCallback( void *outputBuffer, void *inputBuffer,
+                unsigned int nBufferFrames,
+                double streamTime,
+                RtAudioStreamStatus status,
+                void *userData )
+{
+  double *buffer = static_cast<double*>(outputBuffer);
+  double *lastValues = static_cast<double*>(userData);
+
+  if ( status )
+    std::cout << "Stream underflow detected!" << std::endl;
+
+  const unsigned int numChannels = 4;
+
+  // Interleaved audio: frame0[ch0 ch1 ch2 ch3] frame1[ch0 ch1 ch2 ch3] ...
+  for ( unsigned int i = 0; i < nBufferFrames; i++ ) {
+    for ( unsigned int ch = 0; ch < numChannels; ch++ ) {
+      *buffer++ = lastValues[ch];
+
+      // Different slope per channel so they are audible separately
+      lastValues[ch] += 0.005 * (ch + 1);
+      if ( lastValues[ch] >= 1.0 )
+        lastValues[ch] -= 2.0;
+    }
+  }
+
+  return 0;
+}
+
 int main()
 {
-      RtAudio audio;
+    RtAudio audio;
  
     // Get the list of device IDs
     std::vector< unsigned int > ids = audio.getDeviceIds();
@@ -240,9 +270,47 @@ int main()
         info = audio.getDeviceInfo( ids[n] );
     
         // Print, for example, the name and maximum number of output channels for each device
+        std::cout << "device ID: " << info.ID << std::endl;
         std::cout << "device name = " << info.name << std::endl;
         std::cout << ": maximum output channels = " << info.outputChannels << std::endl;
+
+        std::cout << "Avaliable sample rates...\n";
+        for (const auto& sr : info.sampleRates)
+            std::cout << "\t" << sr << "\n";
+
+        std::cout << "preferd sample rate: " << info.preferredSampleRate << std::endl;
+        std::cout << std::endl;
     }
+
+    RtAudio::StreamParameters parameters;
+    parameters.deviceId = 131;
+    parameters.nChannels = 4;
+    parameters.firstChannel = 0;
+    unsigned int sampleRate = 44100;
+    unsigned int bufferFrames = 256;
+    double data[4] = {0.0, 0.0, 0.0, 0.0};
+
+    if (audio.openStream(&parameters, NULL, RTAUDIO_FLOAT64, sampleRate, &bufferFrames, &myCallback, (void *)&data)) {
+        std::cout << audio.getErrorText() << "\n";
+        exit(0);
+    }
+
+      // Stream is open ... now start it.
+    if ( audio.startStream() ) {
+        std::cout << audio.getErrorText() << std::endl;
+        goto cleanup;
+    }
+    
+    char input;
+    std::cout << "\nPlaying ... press <enter> to quit.\n";
+    std::cin.get( input );
+    
+    // Block released ... stop the stream
+    if ( audio.isStreamRunning() )
+        audio.stopStream();  // or could call dac.abortStream();
+    
+    cleanup:
+    if ( audio.isStreamOpen() ) audio.closeStream();
 
     printf("Hello, World!\n");
 
@@ -278,7 +346,7 @@ int main()
         while (SDL_PollEvent(&event))
         {
             if (event.type == SDL_EVENT_KEY_DOWN) {
-                std::cout << "key: " <<  event.key.key << " has been pressed\n";
+                // std::cout << "key: " <<  event.key.key << " has been pressed\n";
 
                 if (event.key.key == 113 /* q */) {
                     x_pos += inc;
