@@ -56,6 +56,13 @@ Point NormaliseVector(Point v) {
     return point;
 }
 
+float CalculateDistance(float x0, float y0, float x1, float y1) {
+    const float dx = x1 - x0;
+    const float dy = y1 - y0;
+
+    return sqrt(dx * dx + dy * dy);
+}
+
 void drawCirclePoints(SDL_Renderer* renderer, int xc, int yc, int x, int y) {
     SDL_RenderPoint(renderer, xc+x, yc+y);
     SDL_RenderPoint(renderer, xc+x, yc+y);
@@ -144,7 +151,7 @@ public:
         return m_index;
     }
 
-    bool IsOn() const {
+    bool IsIntersected() const {
         return m_isOn;
     }
 
@@ -204,7 +211,7 @@ private:
     const float maxNorm = (GLOB_CIRCLE_RAD_F - SMALL_CIRCLE_RAD_F) / GLOB_CIRCLE_RAD_F;
 };
 
-const size_t totalNumberOfNodes = 24;
+const size_t totalNumberOfNodes = 1;
 std::vector<Node> nodes;
 
 float x_pos = 0.f;
@@ -254,6 +261,7 @@ int myCallback( void *outputBuffer, void *inputBuffer,
 
 int main()
 {
+    /*
     RtAudio audio;
  
     // Get the list of device IDs
@@ -311,6 +319,7 @@ int main()
     
     cleanup:
     if ( audio.isStreamOpen() ) audio.closeStream();
+    */
 
     printf("Hello, World!\n");
 
@@ -415,6 +424,19 @@ int main()
 
         for (size_t i = 0; i < totalNumberOfNodes; ++i) {
 
+            // update the NEXT node after drawing
+            if (i + 1 < totalNumberOfNodes) {
+                nodes[i].UpdatePosition(nodes[i + 1]);
+            }
+
+            // TODO flesh this out next!
+             
+            // if (nodes[i].IsIntersected())
+            //     SDL_SetRenderDrawColor(renderer, 255, 0, 0, SDL_ALPHA_OPAQUE);  // red, full alpha
+            // else 
+            //     SDL_SetRenderDrawColor(pRenderer, 255, 255, 255, SDL_ALPHA_OPAQUE);  // white, full alpha 
+            
+
             // draw current node
             drawCircle(
                 pRenderer,
@@ -423,10 +445,7 @@ int main()
                 SMALL_CIRCLE_RAD
             );
 
-            // update the NEXT node after drawing
-            if (i + 1 < totalNumberOfNodes) {
-                nodes[i].UpdatePosition(nodes[i + 1]);
-            }
+
         }
 
         //for (size_t i = 0; i < totalNumberOfNodes; ++i) {
@@ -435,6 +454,37 @@ int main()
 
 
         //}
+
+        Point centerPoint { CENTER_X_F, CENTER_Y_F };
+
+        Point RotatingArmPoint { static_cast<float>(WIDTH / 2) + cosf(t) * GLOB_CIRCLE_RAD_F,
+                                 static_cast<float>(HEIGHT / 2) + sinf(t) * GLOB_CIRCLE_RAD_F };
+
+        Point nodePoint { static_cast<float>(WIDTH / 2) + nodes[0].GetXPos() * GLOB_CIRCLE_RAD_F,
+                          static_cast<float>(HEIGHT / 2) + nodes[0].GetYPos() * GLOB_CIRCLE_RAD_F };
+
+        // vector between node and center of main circle
+        Point vectorA = CreateVector(nodePoint, centerPoint);
+
+        // vector between end point of rotating arm and center of main circle.
+        Point vectorB = CreateVector(RotatingArmPoint, centerPoint);
+
+        const float scalarProjection = CalculateDotProduct(vectorA, NormaliseVector(vectorB));
+        const float spx = static_cast<float>(WIDTH / 2) + scalarProjection * cosf(t);
+        const float spy = static_cast<float>(HEIGHT / 2) + scalarProjection * sinf(t);
+
+        SDL_RenderLine(pRenderer, nodePoint.x, nodePoint.y, spx, spy);
+        // std::cout << "nodePoint.x: " << nodePoint.x << " nodePoint.y: " << nodePoint.y << "\n";
+        // std::cout << "spx: " << spx << " spy: " << spy << "\n";
+
+        // distance between end of rotating arm and node circle.
+        float dist1 = CalculateDistance(RotatingArmPoint.x, RotatingArmPoint.y, nodePoint.x, nodePoint.y);
+        float dist2 = CalculateDistance(nodePoint.x, nodePoint.y, spx, spy);
+
+        if (dist1 < GLOB_CIRCLE_RAD_F && dist2 < 15 /* node circle radius */)
+            std::cout << "Intersecting!!!\n";
+        else
+            std::cout << "NOT intersecting\n";
 
         SDL_RenderPresent(pRenderer);  /* put it all on the screen! */
         t += 0.001;
