@@ -3,6 +3,8 @@
 
 #include <RtAudio.h>
 
+#include <sculpt.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <cstdint>
@@ -229,6 +231,8 @@ void ClampValue(float& value, float min, float max) {
 
 float t = 0.f;
 
+Sculpt::Oscillator::Sawwave saw;
+
 // Four-channel sawtooth wave generator.
 int myCallback( void *outputBuffer, void *inputBuffer,
                 unsigned int nBufferFrames,
@@ -243,16 +247,26 @@ int myCallback( void *outputBuffer, void *inputBuffer,
     std::cout << "Stream underflow detected!" << std::endl;
 
   const unsigned int numChannels = 4;
+  saw.SetFrequency(440.0);
 
   // Interleaved audio: frame0[ch0 ch1 ch2 ch3] frame1[ch0 ch1 ch2 ch3] ...
   for ( unsigned int i = 0; i < nBufferFrames; i++ ) {
+
+    double sample = saw.Process();
+    double gain = 0.2;
+    
     for ( unsigned int ch = 0; ch < numChannels; ch++ ) {
       *buffer++ = lastValues[ch];
 
       // Different slope per channel so they are audible separately
-      lastValues[ch] += 0.005 * (ch + 1);
-      if ( lastValues[ch] >= 1.0 )
-        lastValues[ch] -= 2.0;
+      
+
+
+      lastValues[ch] = sample * gain;
+
+      //lastValues[ch] += 0.005 * (ch + 1);
+      //if ( lastValues[ch] >= 1.0 )
+      //  lastValues[ch] -= 2.0;
     }
   }
 
@@ -261,7 +275,7 @@ int myCallback( void *outputBuffer, void *inputBuffer,
 
 int main()
 {
-    /*
+    
     RtAudio audio;
  
     // Get the list of device IDs
@@ -319,7 +333,6 @@ int main()
     
     cleanup:
     if ( audio.isStreamOpen() ) audio.closeStream();
-    */
 
     printf("Hello, World!\n");
 
