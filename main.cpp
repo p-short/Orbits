@@ -153,8 +153,40 @@ public:
         return m_index;
     }
 
-    bool IsIntersected() const {
-        return m_isOn;
+    bool IsIntersected(const Point& rotatingArm, float rotationSpeed) {
+
+        Point nodePoint { static_cast<float>(WIDTH / 2) + GetXPos() * GLOB_CIRCLE_RAD_F,
+                          static_cast<float>(HEIGHT / 2) + GetYPos() * GLOB_CIRCLE_RAD_F };
+
+        // vector between node and center of main circle
+        Point vectorA = CreateVector(nodePoint, centerPoint);
+
+        // vector between end point of rotating arm and center of main circle.
+        Point vectorB = CreateVector(rotatingArm, centerPoint);
+
+        const float scalarProjection = CalculateDotProduct(vectorA, NormaliseVector(vectorB));
+        const float spx = static_cast<float>(WIDTH / 2) + scalarProjection * cosf(rotationSpeed);
+        const float spy = static_cast<float>(HEIGHT / 2) + scalarProjection * sinf(rotationSpeed);
+
+        //SDL_RenderLine(pRenderer, nodePoint.x, nodePoint.y, spx, spy);
+        // std::cout << "nodePoint.x: " << nodePoint.x << " nodePoint.y: " << nodePoint.y << "\n";
+        // std::cout << "spx: " << spx << " spy: " << spy << "\n";
+
+        // distance between end of rotating arm and node circle.
+        float dist1 = CalculateDistance(rotatingArm.x, rotatingArm.y, nodePoint.x, nodePoint.y);
+        float dist2 = CalculateDistance(nodePoint.x, nodePoint.y, spx, spy);
+        float dist3 = CalculateDistance(nodePoint.x, nodePoint.y, centerPoint.x, centerPoint.y);
+
+        //std::cout << "dist1: " << dist1 << "\n";
+        //std::cout << "dist2: " << dist2 << "\n";
+
+        if (dist1 < GLOB_CIRCLE_RAD_F && dist2 < 15 /* node circle radius */ && dist3 > 15) {
+            //std::cout << "Intersecting!!!\n";
+            return true;
+        } else {
+            //std::cout << "NOT intersecting\n";
+            return false;
+        }
     }
 
     void UpdatePosition(Node& other) {
@@ -211,9 +243,10 @@ private:
     uint32_t m_index { 0 }; 
     bool m_isOn { false };
     const float maxNorm = (GLOB_CIRCLE_RAD_F - SMALL_CIRCLE_RAD_F) / GLOB_CIRCLE_RAD_F;
+    Point centerPoint { CENTER_X_F, CENTER_Y_F };
 };
 
-const size_t totalNumberOfNodes = 1;
+const size_t totalNumberOfNodes = 14;
 std::vector<Node> nodes;
 
 float x_pos = 0.f;
@@ -231,7 +264,57 @@ void ClampValue(float& value, float min, float max) {
 
 float t = 0.f;
 
-Sculpt::Oscillator::Sawwave saw;
+int noteIndex = 0;
+std::array<int, 15> midiNotes = { 0, 2, 3, 5, 7, 8, 10, 12, 14, 15, 17, 19, 20, 22, 24};
+
+struct Voice {
+    bool isActive;
+    uint32_t midiNote;
+    Sculpt::Oscillator::Sawwave osc;
+    Sculpt::Envelope::ADR env;
+};
+
+class PolySynth {
+public:
+    PolySynth() {
+        for (auto& voice : voices) {
+            voice.isActive = false;
+            voice.midiNote = 0;
+            voice.env.SetParameters(0.1, 0.5, 0.2, 2);
+        }
+    }
+
+    void NoteOn(uint32_t midiNote) {
+        for (auto& voice : voices) {
+            voice.isActive = true;
+            voice.midiNote = midiNote;
+            voice.osc.SetFrequency(Sculpt::Utility::MidiNoteToHz(midiNote));
+            voice.env.NoteOn();
+            return;
+        }
+    }
+
+    double Process() {
+        double mix = 0.0;
+        double currentEnvSample;
+
+        for (auto& voice : voices) {
+            if (voice.isActive) {
+                currentEnvSample = voice.env.Process();
+                mix += voice.osc.Process() * currentEnvSample;
+
+                if (currentEnvSample <= 0.0)
+                    voice.isActive = false;
+            }
+        }
+        return mix * 0.2; // small amount of gain to avoid clipping
+    }
+
+private:
+    std::array<Voice, 30> voices;
+};
+
+PolySynth polySynth;
 
 // Four-channel sawtooth wave generator.
 int myCallback( void *outputBuffer, void *inputBuffer,
@@ -247,12 +330,13 @@ int myCallback( void *outputBuffer, void *inputBuffer,
     std::cout << "Stream underflow detected!" << std::endl;
 
   const unsigned int numChannels = 4;
-  saw.SetFrequency(440.0);
+  //int midiNote = 60 + midiNotes[noteIndex];
+  //saw.SetFrequency(Sculpt::Utility::MidiNoteToHz(midiNote));
 
   // Interleaved audio: frame0[ch0 ch1 ch2 ch3] frame1[ch0 ch1 ch2 ch3] ...
   for ( unsigned int i = 0; i < nBufferFrames; i++ ) {
 
-    double sample = saw.Process();
+    double sample = polySynth.Process();
     double gain = 0.2;
     
     for ( unsigned int ch = 0; ch < numChannels; ch++ ) {
@@ -272,6 +356,8 @@ int myCallback( void *outputBuffer, void *inputBuffer,
 
   return 0;
 }
+
+
 
 int main()
 {
@@ -318,21 +404,19 @@ int main()
     }
 
       // Stream is open ... now start it.
-    if ( audio.startStream() ) {
-        std::cout << audio.getErrorText() << std::endl;
-        goto cleanup;
-    }
+    //if ( audio.startStream() ) {
+    //    std::cout << audio.getErrorText() << std::endl;
+    //    goto cleanup;
+    //}
+
+    audio.startStream();
     
-    char input;
-    std::cout << "\nPlaying ... press <enter> to quit.\n";
-    std::cin.get( input );
+    //char input;
+    //std::cout << "\nPlaying ... press <enter> to quit.\n";
+    //std::cin.get( input );
     
-    // Block released ... stop the stream
-    if ( audio.isStreamRunning() )
-        audio.stopStream();  // or could call dac.abortStream();
-    
-    cleanup:
-    if ( audio.isStreamOpen() ) audio.closeStream();
+    //cleanup:
+    //if ( audio.isStreamOpen() ) audio.closeStream();
 
     printf("Hello, World!\n");
 
@@ -373,6 +457,13 @@ int main()
                 if (event.key.key == 113 /* q */) {
                     x_pos += inc;
                     ClampValue(x_pos, -1, 1);
+                    noteIndex++;
+                    if (noteIndex > 14)
+                        noteIndex = 0;
+
+                    polySynth.NoteOn(60 + midiNotes[noteIndex]);
+
+                    // std::cout << "note index is: " << noteIndex;
                 }
 
                 if (event.key.key == 97 /* a */) {
@@ -412,8 +503,15 @@ int main()
                 }
             }
 
-            if (event.type == SDL_EVENT_QUIT)
+            if (event.type == SDL_EVENT_QUIT) {
+                // Block released ... stop the stream
+                if ( audio.isStreamRunning() )
+                    audio.stopStream();  // or could call dac.abortStream();
+
+                if ( audio.isStreamOpen() ) audio.closeStream();
+
                 done = true;
+            }
         }
 
         SDL_SetRenderDrawColor(pRenderer, 0, 0, 0, SDL_ALPHA_OPAQUE);  /* black, full alpha */
@@ -427,6 +525,9 @@ int main()
                        static_cast<float>(HEIGHT / 2),
                        static_cast<float>(WIDTH / 2) + cosf(t) * GLOB_CIRCLE_RAD_F,
                        static_cast<float>(HEIGHT / 2) + sinf(t) * GLOB_CIRCLE_RAD_F);
+
+        Point RotatingArmPoint { static_cast<float>(WIDTH / 2) + cosf(t) * GLOB_CIRCLE_RAD_F,
+                                 static_cast<float>(HEIGHT / 2) + sinf(t) * GLOB_CIRCLE_RAD_F };
 
         // Update node 0 from sliders ONCE
         nodes[0].SetXPos(x_pos);
@@ -442,13 +543,11 @@ int main()
                 nodes[i].UpdatePosition(nodes[i + 1]);
             }
 
-            // TODO flesh this out next!
-             
-            // if (nodes[i].IsIntersected())
-            //     SDL_SetRenderDrawColor(renderer, 255, 0, 0, SDL_ALPHA_OPAQUE);  // red, full alpha
-            // else 
-            //     SDL_SetRenderDrawColor(pRenderer, 255, 255, 255, SDL_ALPHA_OPAQUE);  // white, full alpha 
-            
+            if (nodes[i].IsIntersected(RotatingArmPoint, t)) {
+                SDL_SetRenderDrawColor(pRenderer, 255, 0, 0, SDL_ALPHA_OPAQUE);  // red, full alpha
+            } else {
+                SDL_SetRenderDrawColor(pRenderer, 255, 255, 255, SDL_ALPHA_OPAQUE);  // white, full alpha 
+            } 
 
             // draw current node
             drawCircle(
@@ -458,7 +557,7 @@ int main()
                 SMALL_CIRCLE_RAD
             );
 
-
+ 
         }
 
         //for (size_t i = 0; i < totalNumberOfNodes; ++i) {
@@ -468,36 +567,36 @@ int main()
 
         //}
 
-        Point centerPoint { CENTER_X_F, CENTER_Y_F };
+        // Point centerPoint { CENTER_X_F, CENTER_Y_F };
 
-        Point RotatingArmPoint { static_cast<float>(WIDTH / 2) + cosf(t) * GLOB_CIRCLE_RAD_F,
-                                 static_cast<float>(HEIGHT / 2) + sinf(t) * GLOB_CIRCLE_RAD_F };
+        // Point RotatingArmPoint { static_cast<float>(WIDTH / 2) + cosf(t) * GLOB_CIRCLE_RAD_F,
+        //                          static_cast<float>(HEIGHT / 2) + sinf(t) * GLOB_CIRCLE_RAD_F };
 
-        Point nodePoint { static_cast<float>(WIDTH / 2) + nodes[0].GetXPos() * GLOB_CIRCLE_RAD_F,
-                          static_cast<float>(HEIGHT / 2) + nodes[0].GetYPos() * GLOB_CIRCLE_RAD_F };
+        // Point nodePoint { static_cast<float>(WIDTH / 2) + nodes[0].GetXPos() * GLOB_CIRCLE_RAD_F,
+        //                   static_cast<float>(HEIGHT / 2) + nodes[0].GetYPos() * GLOB_CIRCLE_RAD_F };
 
-        // vector between node and center of main circle
-        Point vectorA = CreateVector(nodePoint, centerPoint);
+        // // vector between node and center of main circle
+        // Point vectorA = CreateVector(nodePoint, centerPoint);
 
-        // vector between end point of rotating arm and center of main circle.
-        Point vectorB = CreateVector(RotatingArmPoint, centerPoint);
+        // // vector between end point of rotating arm and center of main circle.
+        // Point vectorB = CreateVector(RotatingArmPoint, centerPoint);
 
-        const float scalarProjection = CalculateDotProduct(vectorA, NormaliseVector(vectorB));
-        const float spx = static_cast<float>(WIDTH / 2) + scalarProjection * cosf(t);
-        const float spy = static_cast<float>(HEIGHT / 2) + scalarProjection * sinf(t);
+        // const float scalarProjection = CalculateDotProduct(vectorA, NormaliseVector(vectorB));
+        // const float spx = static_cast<float>(WIDTH / 2) + scalarProjection * cosf(t);
+        // const float spy = static_cast<float>(HEIGHT / 2) + scalarProjection * sinf(t);
 
-        SDL_RenderLine(pRenderer, nodePoint.x, nodePoint.y, spx, spy);
-        // std::cout << "nodePoint.x: " << nodePoint.x << " nodePoint.y: " << nodePoint.y << "\n";
-        // std::cout << "spx: " << spx << " spy: " << spy << "\n";
+        // SDL_RenderLine(pRenderer, nodePoint.x, nodePoint.y, spx, spy);
+        // // std::cout << "nodePoint.x: " << nodePoint.x << " nodePoint.y: " << nodePoint.y << "\n";
+        // // std::cout << "spx: " << spx << " spy: " << spy << "\n";
 
-        // distance between end of rotating arm and node circle.
-        float dist1 = CalculateDistance(RotatingArmPoint.x, RotatingArmPoint.y, nodePoint.x, nodePoint.y);
-        float dist2 = CalculateDistance(nodePoint.x, nodePoint.y, spx, spy);
+        // // distance between end of rotating arm and node circle.
+        // float dist1 = CalculateDistance(RotatingArmPoint.x, RotatingArmPoint.y, nodePoint.x, nodePoint.y);
+        // float dist2 = CalculateDistance(nodePoint.x, nodePoint.y, spx, spy);
 
-        if (dist1 < GLOB_CIRCLE_RAD_F && dist2 < 15 /* node circle radius */)
-            std::cout << "Intersecting!!!\n";
-        else
-            std::cout << "NOT intersecting\n";
+        // if (dist1 < GLOB_CIRCLE_RAD_F && dist2 < 15 /* node circle radius */)
+        //     std::cout << "Intersecting!!!\n";
+        // else
+        //     std::cout << "NOT intersecting\n";
 
         SDL_RenderPresent(pRenderer);  /* put it all on the screen! */
         t += 0.001;
