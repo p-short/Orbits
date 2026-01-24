@@ -103,6 +103,17 @@ void drawCircle(SDL_Renderer* renderer, int xc, int yc, int r) {
 
 void ClampValue(float& value, float min, float max); // forward dec
 
+class OneShot {
+public:
+    bool Process(bool signal) {
+        bool fire = signal && !previous;
+        previous = signal;
+        return fire;
+    }
+private:
+    bool previous = false;
+};
+
 class Node {
 public:
     Node(uint32_t index) {
@@ -247,6 +258,7 @@ private:
 };
 
 const size_t totalNumberOfNodes = 14;
+std::vector<OneShot> triggers;
 std::vector<Node> nodes;
 
 float x_pos = 0.f;
@@ -264,47 +276,79 @@ void ClampValue(float& value, float min, float max) {
 
 float t = 0.f;
 
-int noteIndex = 0;
 std::array<int, 15> midiNotes = { 0, 2, 3, 5, 7, 8, 10, 12, 14, 15, 17, 19, 20, 22, 24};
 
 struct Voice {
     bool isActive;
     uint32_t midiNote;
+    uint32_t duration;
     Sculpt::Oscillator::Sawwave osc;
     Sculpt::Envelope::ADR env;
 };
 
+// TODO: fix early env ending bug.
+// first envelope sounds for the entire envelope
+// subsequent envelopes get to 0.5 then straight to 0 (missing the release phase)
+// thus killing the voice in PolySynth.Process method.
 class PolySynth {
 public:
     PolySynth() {
         for (auto& voice : voices) {
             voice.isActive = false;
             voice.midiNote = 0;
-            voice.env.SetParameters(0.1, 0.5, 0.2, 2);
+            voice.duration = 0;
+            voice.env.SetParameters(0.1, 0.5, 0.2, 5);
         }
     }
 
     void NoteOn(uint32_t midiNote) {
         for (auto& voice : voices) {
-            voice.isActive = true;
-            voice.midiNote = midiNote;
-            voice.osc.SetFrequency(Sculpt::Utility::MidiNoteToHz(midiNote));
-            voice.env.NoteOn();
-            return;
+            // TODO: theres zero checks if voice is active or not.
+            // think its cutting first note short over and over.
+            if (!voice.isActive) {
+                voice.isActive = true;
+                voice.midiNote = midiNote;
+                voice.duration = 0;
+                voice.osc.SetFrequency(Sculpt::Utility::MidiNoteToHz(midiNote));
+                voice.env.NoteOn();
+                return;
+            }
         }
+
+        // if code gets this far its because all voices are active
+        // find the oldest voice (one with largest duration) and steal that
+        uint32_t largestDuration = 0;
+        uint32_t index = 0;
+        for (int i = 0; i < voices.size(); ++i) {
+            if (voices[i].duration > largestDuration) {
+                largestDuration = voices[i].duration;
+                index = i;
+            }
+        }
+
+        // TODO: envelope class needs a Reset method.
+        // steal voice
+        voices[index].isActive = true;
+        voices[index].midiNote = midiNote;
+        voices[index].duration = 0;
+        voices[index].osc.SetFrequency(Sculpt::Utility::MidiNoteToHz(midiNote));
+        voices[index].env.NoteOn();
     }
 
     double Process() {
         double mix = 0.0;
-        double currentEnvSample;
+        double currentEnvSample = 0.0;
 
         for (auto& voice : voices) {
             if (voice.isActive) {
+                voice.duration++;
+
                 currentEnvSample = voice.env.Process();
                 mix += voice.osc.Process() * currentEnvSample;
 
-                if (currentEnvSample <= 0.0)
+                if (currentEnvSample <= 0.0) {
                     voice.isActive = false;
+                }
             }
         }
         return mix * 0.2; // small amount of gain to avoid clipping
@@ -442,6 +486,7 @@ int main()
     // create nodes
     for (size_t i = 0; i < totalNumberOfNodes; ++i) {
         nodes.push_back(Node(i));
+        triggers.push_back(OneShot());
     }
 
     bool done = false;
@@ -457,13 +502,6 @@ int main()
                 if (event.key.key == 113 /* q */) {
                     x_pos += inc;
                     ClampValue(x_pos, -1, 1);
-                    noteIndex++;
-                    if (noteIndex > 14)
-                        noteIndex = 0;
-
-                    polySynth.NoteOn(60 + midiNotes[noteIndex]);
-
-                    // std::cout << "note index is: " << noteIndex;
                 }
 
                 if (event.key.key == 97 /* a */) {
@@ -543,7 +581,12 @@ int main()
                 nodes[i].UpdatePosition(nodes[i + 1]);
             }
 
+            if (triggers[i].Process(nodes[i].IsIntersected(RotatingArmPoint, t)))
+                polySynth.NoteOn(60 + midiNotes[nodes[i].GetIndex()]);
+
             if (nodes[i].IsIntersected(RotatingArmPoint, t)) {
+
+
                 SDL_SetRenderDrawColor(pRenderer, 255, 0, 0, SDL_ALPHA_OPAQUE);  // red, full alpha
             } else {
                 SDL_SetRenderDrawColor(pRenderer, 255, 255, 255, SDL_ALPHA_OPAQUE);  // white, full alpha 
