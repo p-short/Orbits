@@ -257,7 +257,7 @@ private:
     Point centerPoint { CENTER_X_F, CENTER_Y_F };
 };
 
-const size_t totalNumberOfNodes = 14;
+const size_t totalNumberOfNodes = 4;
 std::vector<OneShot> triggers;
 std::vector<Node> nodes;
 
@@ -276,14 +276,45 @@ void ClampValue(float& value, float min, float max) {
 
 float t = 0.f;
 
-std::array<int, 15> midiNotes = { 0, 2, 3, 5, 7, 8, 10, 12, 14, 15, 17, 19, 20, 22, 24};
+struct QuadGains { float tl, tr, br, bl; };
+
+QuadGains ComputeTargetGains(float dx, float dy) {
+    float len = std::sqrt(dx * dx + dy * dy);
+    if (len > 0.f) {
+        dx /= len;
+        dy /= len;
+    }
+
+    const float inv = 0.70710678f;
+
+    float tl = std::max(0.0f, (-dx - dy) * inv);
+    float tr = std::max(0.0f, ( dx - dy) * inv);
+    float br = std::max(0.0f, ( dx + dy) * inv);
+    float bl = std::max(0.0f, (-dx + dy) * inv);
+
+    tl = std::sqrt(tl);
+    tr = std::sqrt(tr);
+    br = std::sqrt(br);
+    bl = std::sqrt(bl);
+
+    float sum = tl + tr + br + bl;
+    if (sum > 0.0f) {
+        tl /= sum;
+        tr /= sum;
+        br /= sum;
+        bl /= sum;
+    }
+
+    return {tr, tl, br, bl};
+}
 
 struct Voice {
     bool isActive;
-    uint32_t midiNote;
+    uint32_t nodeIndex;
     uint32_t duration;
     Sculpt::Oscillator::Sawwave osc;
     Sculpt::Envelope::ADR env;
+    QuadGains prevGain;
 };
 
 // TODO: fix early env ending bug.
@@ -295,25 +326,34 @@ public:
     PolySynth() {
         for (auto& voice : voices) {
             voice.isActive = false;
-            voice.midiNote = 0;
+            voice.nodeIndex = 0;
             voice.duration = 0;
             voice.env.SetParameters(0.1, 0.5, 0.2, 5);
+            voice.prevGain.tl = 0.0f;
+            voice.prevGain.tr = 0.0f;
+            voice.prevGain.br = 0.0f;
+            voice.prevGain.bl = 0.0f;
         }
     }
 
-    void NoteOn(uint32_t midiNote) {
+    void NoteOn(uint32_t nodeIndex) {
+        //std::cout << "notes: " << noteOffset + midiNotes[nodeIndex] << "\n";
         for (auto& voice : voices) {
             // TODO: theres zero checks if voice is active or not.
             // think its cutting first note short over and over.
             if (!voice.isActive) {
+                //std::cout << "yep\n";
                 voice.isActive = true;
-                voice.midiNote = midiNote;
+                voice.nodeIndex = nodeIndex;
                 voice.duration = 0;
-                voice.osc.SetFrequency(Sculpt::Utility::MidiNoteToHz(midiNote));
+                voice.osc.SetFrequency(Sculpt::Utility::MidiNoteToHz(noteOffset + midiNotes[nodeIndex]));
+                //std::cout << "notes: " << noteOffset + midiNotes[nodeIndex] << "\n";
                 voice.env.NoteOn();
                 return;
             }
         }
+
+        std::cout << "Voices array is full and active.\n";
 
         // if code gets this far its because all voices are active
         // find the oldest voice (one with largest duration) and steal that
@@ -329,9 +369,9 @@ public:
         // TODO: envelope class needs a Reset method.
         // steal voice
         voices[index].isActive = true;
-        voices[index].midiNote = midiNote;
+        voices[index].nodeIndex = nodeIndex;
         voices[index].duration = 0;
-        voices[index].osc.SetFrequency(Sculpt::Utility::MidiNoteToHz(midiNote));
+        voices[index].osc.SetFrequency(Sculpt::Utility::MidiNoteToHz(noteOffset + midiNotes[nodeIndex]));
         voices[index].env.NoteOn();
     }
 
@@ -348,14 +388,18 @@ public:
 
                 if (currentEnvSample <= 0.0) {
                     voice.isActive = false;
+                    voice.duration = 0;
                 }
             }
         }
         return mix * 0.2; // small amount of gain to avoid clipping
     }
 
-private:
     std::array<Voice, 30> voices;
+
+private:
+    std::array<int, 15> midiNotes = { 0, 2, 3, 5, 7, 8, 10, 12, 14, 15, 17, 19, 20, 22, 24};
+    const uint32_t noteOffset = 60;
 };
 
 PolySynth polySynth;
@@ -379,23 +423,73 @@ int myCallback( void *outputBuffer, void *inputBuffer,
 
   // Interleaved audio: frame0[ch0 ch1 ch2 ch3] frame1[ch0 ch1 ch2 ch3] ...
   for ( unsigned int i = 0; i < nBufferFrames; i++ ) {
+    double topLeft = 0.0;
+    double topRight = 0.0;
+    double bottomRight = 0.0;
+    double bottomLeft = 0.0;
 
-    double sample = polySynth.Process();
+
+    //double sample = polySynth.Process();
     double gain = 0.2;
-    
-    for ( unsigned int ch = 0; ch < numChannels; ch++ ) {
-      *buffer++ = lastValues[ch];
 
-      // Different slope per channel so they are audible separately
+        double mix = 0.0;
+        double currentEnvSample = 0.0;
+
+        for (auto& voice : polySynth.voices) {
+            if (voice.isActive) {
+                voice.duration++;
+
+                currentEnvSample = voice.env.Process();
+                mix += voice.osc.Process() * currentEnvSample;
+
+                if (currentEnvSample <= 0.0) {
+                    voice.isActive = false;
+                    voice.duration = 0;
+                }
+
+                float x = WIDTH_F / 2.f + nodes[voice.nodeIndex].GetXPos() * GLOB_CIRCLE_RAD_F;
+                float y = HEIGHT_F / 2.f + nodes[voice.nodeIndex].GetYPos() * GLOB_CIRCLE_RAD_F;
+
+                float cx = CENTER_X_F;
+                float cy = CENTER_Y_F;
+
+                float dx = x - cx;
+                float dy = y - cy;
+
+                QuadGains target = ComputeTargetGains(dx, dy);
+
+                const float smooth = 0.002f;
+                voice.prevGain.tl += smooth * (target.tl - voice.prevGain.tl);
+                voice.prevGain.tr += smooth * (target.tr - voice.prevGain.tr);
+                voice.prevGain.br += smooth * (target.br - voice.prevGain.br);
+                voice.prevGain.bl += smooth * (target.bl - voice.prevGain.bl);
+
+                topLeft = mix * voice.prevGain.tl;
+                topRight = mix * voice.prevGain.tr;
+                bottomRight = mix * voice.prevGain.br;
+                bottomLeft = mix * voice.prevGain.bl;
+            }
+        }
+        mix * 0.09; // small amount of gain to avoid clipping
+    
+
+    *buffer++ = lastValues[0] = bottomRight;
+    *buffer++ = lastValues[1] = bottomLeft;
+    *buffer++ = lastValues[2] = topLeft;
+    *buffer++ = lastValues[3] = topRight;
+    //for ( unsigned int ch = 0; ch < numChannels; ch++ ) {
+      ///*buffer++ = lastValues[ch];
+
+     // Different slope per channel so they are audible separately
       
 
 
-      lastValues[ch] = sample * gain;
+      //lastValues[ch] = mix * gain;
 
       //lastValues[ch] += 0.005 * (ch + 1);
       //if ( lastValues[ch] >= 1.0 )
-      //  lastValues[ch] -= 2.0;
-    }
+       //lastValues[ch] -= 2.0;
+    //}
   }
 
   return 0;
@@ -582,7 +676,7 @@ int main()
             }
 
             if (triggers[i].Process(nodes[i].IsIntersected(RotatingArmPoint, t)))
-                polySynth.NoteOn(60 + midiNotes[nodes[i].GetIndex()]);
+                polySynth.NoteOn(nodes[i].GetIndex());
 
             if (nodes[i].IsIntersected(RotatingArmPoint, t)) {
 
