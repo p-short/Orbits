@@ -262,7 +262,7 @@ struct NodeAudioState {
     float y;
 };
 
-const size_t totalNumberOfNodes = 4;
+const size_t totalNumberOfNodes = 14;
 std::vector<OneShot> triggers;
 std::vector<Node> nodes;
 std::vector<NodeAudioState> nodeAudioStates;
@@ -439,6 +439,8 @@ int myCallback( void *outputBuffer, void *inputBuffer,
   const unsigned int numChannels = 4;
   //int midiNote = 60 + midiNotes[noteIndex];
   //saw.SetFrequency(Sculpt::Utility::MidiNoteToHz(midiNote));
+  double s = 0.0;
+  double currentEnvSample = 0.0;
 
   // Interleaved audio: frame0[ch0 ch1 ch2 ch3] frame1[ch0 ch1 ch2 ch3] ...
   for ( unsigned int i = 0; i < nBufferFrames; i++ ) {
@@ -449,48 +451,45 @@ int myCallback( void *outputBuffer, void *inputBuffer,
 
 
     //double sample = polySynth.Process();
-    double gain = 0.2;
+    //double gain = 0.2
 
-        double s = 0.0;
-        double currentEnvSample = 0.0;
+    for (auto& voice : polySynth.voices) {
+        if (voice.isActive) {
+            voice.duration++;
 
-        for (auto& voice : polySynth.voices) {
-            if (voice.isActive) {
-                voice.duration++;
+            currentEnvSample = voice.env.Process();
+            s = voice.osc.Process() * currentEnvSample;
 
-                currentEnvSample = voice.env.Process();
-                s += voice.osc.Process() * currentEnvSample;
-
-                if (currentEnvSample <= 0.0) {
-                    voice.isActive = false;
-                    voice.duration = 0;
-                }
-
-                float x = WIDTH_F / 2.f + nodeAudioStates[voice.nodeIndex].x * GLOB_CIRCLE_RAD_F;
-                float y = HEIGHT_F / 2.f + nodeAudioStates[voice.nodeIndex].y * GLOB_CIRCLE_RAD_F;
-
-                float cx = CENTER_X_F;
-                float cy = CENTER_Y_F;
-
-                float dx = x - cx;
-                float dy = y - cy;
-
-                QuadGains target = ComputeTargetGains(dx, dy);
-
-                const float smoothTimeInMS = 10.f;
-                const float smooth = 1.0f - std::exp(-1.0 / (smoothTimeInMS * 0.001f * 44100.0));
-                voice.prevGain.tl += smooth * (target.tl - voice.prevGain.tl);
-                voice.prevGain.tr += smooth * (target.tr - voice.prevGain.tr);
-                voice.prevGain.br += smooth * (target.br - voice.prevGain.br);
-                voice.prevGain.bl += smooth * (target.bl - voice.prevGain.bl);
-
-                topLeft += s * voice.prevGain.tl;
-                topRight += s * voice.prevGain.tr;
-                bottomRight += s * voice.prevGain.br;
-                bottomLeft += s * voice.prevGain.bl;
+            if (currentEnvSample <= 0.0) {
+                voice.isActive = false;
+                voice.duration = 0;
             }
+
+            float x = WIDTH_F / 2.f + nodeAudioStates[voice.nodeIndex].x * GLOB_CIRCLE_RAD_F;
+            float y = HEIGHT_F / 2.f + nodeAudioStates[voice.nodeIndex].y * GLOB_CIRCLE_RAD_F;
+
+            float cx = CENTER_X_F;
+            float cy = CENTER_Y_F;
+
+            float dx = x - cx;
+            float dy = y - cy;
+
+            QuadGains target = ComputeTargetGains(dx, dy);
+
+            const float smoothTimeInMS = 10.f;
+            const float smooth = 1.0f - std::exp(-1.0 / (smoothTimeInMS * 0.001f * 44100.0));
+            voice.prevGain.tl += smooth * (target.tl - voice.prevGain.tl);
+            voice.prevGain.tr += smooth * (target.tr - voice.prevGain.tr);
+            voice.prevGain.br += smooth * (target.br - voice.prevGain.br);
+            voice.prevGain.bl += smooth * (target.bl - voice.prevGain.bl);
+
+            topLeft += s * voice.prevGain.tl;
+            topRight += s * voice.prevGain.tr;
+            bottomRight += s * voice.prevGain.br;
+            bottomLeft += s * voice.prevGain.bl;
         }
-        //s * 0.2; // small amount of gain to avoid clipping
+    }
+    //s * 0.2; // small amount of gain to avoid clipping
     
 
     buffer[0] = bottomRight * 0.2;
