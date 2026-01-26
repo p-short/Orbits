@@ -257,9 +257,15 @@ private:
     Point centerPoint { CENTER_X_F, CENTER_Y_F };
 };
 
+struct NodeAudioState {
+    float x;
+    float y;
+};
+
 const size_t totalNumberOfNodes = 4;
 std::vector<OneShot> triggers;
 std::vector<Node> nodes;
+std::vector<NodeAudioState> nodeAudioStates;
 
 float x_pos = 0.f;
 float y_pos = 0.f;
@@ -345,6 +351,19 @@ public:
                 //std::cout << "yep\n";
                 voice.isActive = true;
                 voice.nodeIndex = nodeIndex;
+
+
+                float x = WIDTH_F / 2.f + nodes[voice.nodeIndex].GetXPos() * GLOB_CIRCLE_RAD_F;
+                float y = HEIGHT_F / 2.f + nodes[voice.nodeIndex].GetYPos() * GLOB_CIRCLE_RAD_F;
+
+                float cx = CENTER_X_F;
+                float cy = CENTER_Y_F;
+
+                float dx = x - cx;
+                float dy = y - cy;
+
+                voice.prevGain = ComputeTargetGains(dx, dy);
+
                 voice.duration = 0;
                 voice.osc.SetFrequency(Sculpt::Utility::MidiNoteToHz(noteOffset + midiNotes[nodeIndex]));
                 //std::cout << "notes: " << noteOffset + midiNotes[nodeIndex] << "\n";
@@ -432,7 +451,7 @@ int myCallback( void *outputBuffer, void *inputBuffer,
     //double sample = polySynth.Process();
     double gain = 0.2;
 
-        double mix = 0.0;
+        double s = 0.0;
         double currentEnvSample = 0.0;
 
         for (auto& voice : polySynth.voices) {
@@ -440,15 +459,15 @@ int myCallback( void *outputBuffer, void *inputBuffer,
                 voice.duration++;
 
                 currentEnvSample = voice.env.Process();
-                mix += voice.osc.Process() * currentEnvSample;
+                s += voice.osc.Process() * currentEnvSample;
 
                 if (currentEnvSample <= 0.0) {
                     voice.isActive = false;
                     voice.duration = 0;
                 }
 
-                float x = WIDTH_F / 2.f + nodes[voice.nodeIndex].GetXPos() * GLOB_CIRCLE_RAD_F;
-                float y = HEIGHT_F / 2.f + nodes[voice.nodeIndex].GetYPos() * GLOB_CIRCLE_RAD_F;
+                float x = WIDTH_F / 2.f + nodeAudioStates[voice.nodeIndex].x * GLOB_CIRCLE_RAD_F;
+                float y = HEIGHT_F / 2.f + nodeAudioStates[voice.nodeIndex].y * GLOB_CIRCLE_RAD_F;
 
                 float cx = CENTER_X_F;
                 float cy = CENTER_Y_F;
@@ -458,25 +477,28 @@ int myCallback( void *outputBuffer, void *inputBuffer,
 
                 QuadGains target = ComputeTargetGains(dx, dy);
 
-                const float smooth = 0.002f;
+                const float smoothTimeInMS = 10.f;
+                const float smooth = 1.0f - std::exp(-1.0 / (smoothTimeInMS * 0.001f * 44100.0));
                 voice.prevGain.tl += smooth * (target.tl - voice.prevGain.tl);
                 voice.prevGain.tr += smooth * (target.tr - voice.prevGain.tr);
                 voice.prevGain.br += smooth * (target.br - voice.prevGain.br);
                 voice.prevGain.bl += smooth * (target.bl - voice.prevGain.bl);
 
-                topLeft = mix * voice.prevGain.tl;
-                topRight = mix * voice.prevGain.tr;
-                bottomRight = mix * voice.prevGain.br;
-                bottomLeft = mix * voice.prevGain.bl;
+                topLeft += s * voice.prevGain.tl;
+                topRight += s * voice.prevGain.tr;
+                bottomRight += s * voice.prevGain.br;
+                bottomLeft += s * voice.prevGain.bl;
             }
         }
-        mix * 0.09; // small amount of gain to avoid clipping
+        //s * 0.2; // small amount of gain to avoid clipping
     
 
-    *buffer++ = lastValues[0] = bottomRight;
-    *buffer++ = lastValues[1] = bottomLeft;
-    *buffer++ = lastValues[2] = topLeft;
-    *buffer++ = lastValues[3] = topRight;
+    buffer[0] = bottomRight * 0.2;
+    buffer[1] = bottomLeft * 0.2;
+    buffer[2] = topLeft * 0.2;
+    buffer[3] = topRight * 0.2;
+
+    buffer += 4;
     //for ( unsigned int ch = 0; ch < numChannels; ch++ ) {
       ///*buffer++ = lastValues[ch];
 
@@ -581,6 +603,7 @@ int main()
     for (size_t i = 0; i < totalNumberOfNodes; ++i) {
         nodes.push_back(Node(i));
         triggers.push_back(OneShot());
+        nodeAudioStates.push_back(NodeAudioState());
     }
 
     bool done = false;
@@ -674,6 +697,9 @@ int main()
             if (i + 1 < totalNumberOfNodes) {
                 nodes[i].UpdatePosition(nodes[i + 1]);
             }
+
+            nodeAudioStates[i].x = nodes[i].GetXPos();
+            nodeAudioStates[i].y = nodes[i].GetYPos();
 
             if (triggers[i].Process(nodes[i].IsIntersected(RotatingArmPoint, t)))
                 polySynth.NoteOn(nodes[i].GetIndex());
