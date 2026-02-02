@@ -1,6 +1,8 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
+#include <bcm2835.h>
+
 #include <RtAudio.h>
 
 #include <sculpt.h>
@@ -9,8 +11,11 @@
 #include <stdlib.h>
 #include <cstdint>
 #include <cmath>
-
 #include <vector>
+#include <array>
+#include <atomic>
+#include <thread>
+#include <chrono> 
 #include <iostream>
 
 #define WIDTH 640
@@ -30,6 +35,62 @@ const float SMALL_CIRCLE_RAD_F = static_cast<float>(SMALL_CIRCLE_RAD);
 struct Point {
     float x;
     float y;
+};
+
+class ADCSampler {
+public:
+    ADCSampler() {}
+
+    bool start(int32_t sampleTimeInHz) {
+        m_period = std::chrono::microseconds(1'000'000 / sampleTimeInHz);
+        m_isRunning = true;
+
+        m_thread = std::thread(&ADCSampler::Run, this);
+        return true;
+    }
+
+    bool stop() {
+        m_isRunning = false;
+        if (m_thread.joinable())
+            m_thread.join();
+
+        return true;
+    }
+
+    uint16_t value(uint8_t channel) {
+        return m_value[channel].load(std::memory_order_relaxed);
+    }
+
+private:
+
+    uint16_t read_mcp3008(uint8_t channel) {
+        char tx[3] = {
+            0x01, 
+            static_cast<char>((0x08 | channel) << 4), 
+            0x00
+        };
+
+        char rx[3] = {0};
+
+        bcm2835_spi_transfernb(tx, rx, 3);
+
+        // 10-bit result
+        return static_cast<uint16_t>(((rx[1] & 0x03) << 8) | rx[2]);
+    }
+
+    void Run() {
+        while(m_isRunning) {
+            for (uint8_t ch = 0; ch < m_value.size(); ++ch) {
+                m_value[ch].store(read_mcp3008(ch), std::memory_order_relaxed);
+            }
+            std::this_thread::sleep_for(m_period);
+        }
+    }
+
+    std::array<std::atomic<uint16_t>, 4> m_value{};
+    std::atomic<bool> m_isRunning {false};
+    std::thread m_thread;
+    std::chrono::microseconds m_period;
 };
 
 Point CreateVector(Point p0, Point p1) {
@@ -246,6 +307,22 @@ public:
             m_main_coords.y *= maxNorm;
         }
     }
+
+    float GetNormalizedDistFromCenter() {
+        float x = WIDTH_F / 2.f + GetXPos() * GLOB_CIRCLE_RAD_F;
+        float y = HEIGHT_F / 2.f + GetYPos() * GLOB_CIRCLE_RAD_F;
+
+        float cx = CENTER_X_F;
+        float cy = CENTER_Y_F;
+
+        float dx = x - cx;
+        float dy = y - cy;
+
+        float len = std::sqrt(dx * dx + dy * dy);
+        len = (len / (GLOB_CIRCLE_RAD_F - SMALL_CIRCLE_RAD_F));
+
+        return len;
+    }
     
 private:
     Point m_main_coords;
@@ -253,6 +330,7 @@ private:
     float m_velocity { 0.f };
     uint32_t m_index { 0 }; 
     bool m_isOn { false };
+    float normalizedDistFromCenter {0.f};
     const float maxNorm = (GLOB_CIRCLE_RAD_F - SMALL_CIRCLE_RAD_F) / GLOB_CIRCLE_RAD_F;
     Point centerPoint { CENTER_X_F, CENTER_Y_F };
 };
@@ -262,7 +340,7 @@ struct NodeAudioState {
     float y;
 };
 
-const size_t totalNumberOfNodes = 14;
+const size_t totalNumberOfNodes = 1;
 std::vector<OneShot> triggers;
 std::vector<Node> nodes;
 std::vector<NodeAudioState> nodeAudioStates;
@@ -317,8 +395,10 @@ QuadGains ComputeTargetGains(float dx, float dy) {
 struct Voice {
     bool isActive;
     uint32_t nodeIndex;
+    double initFreq;
     uint32_t duration;
     Sculpt::Oscillator::Sawwave osc;
+    Sculpt::Oscillator::Sinewave lfo;
     Sculpt::Envelope::ADR env;
     QuadGains prevGain;
 };
@@ -351,7 +431,7 @@ public:
                 //std::cout << "yep\n";
                 voice.isActive = true;
                 voice.nodeIndex = nodeIndex;
-
+                voice.initFreq = Sculpt::Utility::MidiNoteToHz(noteOffset + midiNotes[nodeIndex]);
 
                 float x = WIDTH_F / 2.f + nodes[voice.nodeIndex].GetXPos() * GLOB_CIRCLE_RAD_F;
                 float y = HEIGHT_F / 2.f + nodes[voice.nodeIndex].GetYPos() * GLOB_CIRCLE_RAD_F;
@@ -365,8 +445,12 @@ public:
                 voice.prevGain = ComputeTargetGains(dx, dy);
 
                 voice.duration = 0;
-                voice.osc.SetFrequency(Sculpt::Utility::MidiNoteToHz(noteOffset + midiNotes[nodeIndex]));
-                //std::cout << "notes: " << noteOffset + midiNotes[nodeIndex] << "\n";
+                voice.osc.SetFrequency(voice.initFreq);
+                // TODO: Node should ave a variable hat denote the normalized distance from center to radius
+                // this should be used to set the freq of the LFO
+                double lfoFreq = nodes[voice.nodeIndex].GetNormalizedDistFromCenter();
+                voice.lfo.SetFrequency(lfoFreq * 2);
+                voice.lfo.Reset(); // resets phase
                 voice.env.NoteOn();
                 return;
             }
@@ -390,30 +474,31 @@ public:
         voices[index].isActive = true;
         voices[index].nodeIndex = nodeIndex;
         voices[index].duration = 0;
-        voices[index].osc.SetFrequency(Sculpt::Utility::MidiNoteToHz(noteOffset + midiNotes[nodeIndex]));
+        voices[index].osc.SetFrequency(voices[index].initFreq);
         voices[index].env.NoteOn();
     }
 
-    double Process() {
-        double mix = 0.0;
-        double currentEnvSample = 0.0;
+    // double Process() {
+    //     double mix = 0.0;
+    //     double currentEnvSample = 0.0;
 
-        for (auto& voice : voices) {
-            if (voice.isActive) {
-                voice.duration++;
+    //     for (auto& voice : voices) {
+    //         if (voice.isActive) {
+    //             voice.duration++;
 
-                currentEnvSample = voice.env.Process();
-                mix += voice.osc.Process() * currentEnvSample;
+    //             currentEnvSample = voice.env.Process();
+    //             mix += voice.osc.Process() * currentEnvSample;
 
-                if (currentEnvSample <= 0.0) {
-                    voice.isActive = false;
-                    voice.duration = 0;
-                }
-            }
-        }
-        return mix * 0.2; // small amount of gain to avoid clipping
-    }
+    //             if (currentEnvSample <= 0.0) {
+    //                 voice.isActive = false;
+    //                 voice.duration = 0;
+    //             }
+    //         }
+    //     }
+    //     return mix * 0.2; // small amount of gain to avoid clipping
+    // }
 
+    // note its not the amount of voice that is causing the odd note not to trigger.
     std::array<Voice, 30> voices;
 
 private:
@@ -440,6 +525,7 @@ int myCallback( void *outputBuffer, void *inputBuffer,
   //int midiNote = 60 + midiNotes[noteIndex];
   //saw.SetFrequency(Sculpt::Utility::MidiNoteToHz(midiNote));
   double s = 0.0;
+  double lfoValue = 0.0;
   double currentEnvSample = 0.0;
 
   // Interleaved audio: frame0[ch0 ch1 ch2 ch3] frame1[ch0 ch1 ch2 ch3] ...
@@ -458,6 +544,11 @@ int myCallback( void *outputBuffer, void *inputBuffer,
             voice.duration++;
 
             currentEnvSample = voice.env.Process();
+
+            lfoValue = voice.lfo.Process();
+            // TODO get frequency set in note on and add lfo to it
+            double noteFreq = voice.initFreq; 
+            voice.osc.SetFrequency(noteFreq + lfoValue);
             s = voice.osc.Process() * currentEnvSample;
 
             if (currentEnvSample <= 0.0) {
@@ -520,6 +611,25 @@ int myCallback( void *outputBuffer, void *inputBuffer,
 
 int main()
 {
+    if (!bcm2835_init()) {
+        std::cout << "bcm2835_init failed\n";
+        return -1;
+    }
+
+    if (!bcm2835_spi_begin()) {
+        std::cout << "bcm2835_spi_begin failed\n";
+        return -1;
+    }
+
+    // SPI configuration
+    bcm2835_spi_setBitOrder(BCM2835_SPI_BIT_ORDER_MSBFIRST);
+    bcm2835_spi_setDataMode(BCM2835_SPI_MODE0);
+    bcm2835_spi_setClockDivider(BCM2835_SPI_CLOCK_DIVIDER_1024);
+    bcm2835_spi_chipSelect(BCM2835_SPI_CS0);
+    bcm2835_spi_setChipSelectPolarity(BCM2835_SPI_CS0, LOW);
+
+    ADCSampler adc_sampler;
+    adc_sampler.start(60);
     
     RtAudio audio;
  
@@ -616,48 +726,52 @@ int main()
                 // std::cout << "key: " <<  event.key.key << " has been pressed\n";
 
                 if (event.key.key == 113 /* q */) {
-                    x_pos += inc;
-                    ClampValue(x_pos, -1, 1);
+                    //x_pos += inc;
+                    //ClampValue(x_pos, -1, 1);
                 }
 
                 if (event.key.key == 97 /* a */) {
-                    x_pos -= inc;
-                    ClampValue(x_pos, -1, 1);
+                    //x_pos -= inc;
+                    //ClampValue(x_pos, -1, 1);
                 }
 
                 if (event.key.key == 119 /* w */) {
-                    y_pos += inc;
-                    ClampValue(y_pos, -1, 1);
+                    //y_pos += inc;
+                    //ClampValue(y_pos, -1, 1);
                 }
 
                 if (event.key.key == 115 /* s */) {
-                    y_pos -= inc;
-                    ClampValue(y_pos, -1, 1);
+                    //y_pos -= inc;
+                    //ClampValue(y_pos, -1, 1);
                 }
 
 
                 if (event.key.key == 101 /* e */) {
-                    cx_pos += inc;
-                    ClampValue(cx_pos, -1, 1);
+                    //cx_pos += inc;
+                    //ClampValue(cx_pos, -1, 1);
                 }
 
                 if (event.key.key == 100 /* d */) {
-                    cx_pos -= inc;
-                    ClampValue(cx_pos, -1, 1);
+                    //cx_pos -= inc;
+                    //ClampValue(cx_pos, -1, 1);
                 }
 
                 if (event.key.key == 114 /* r */) {
-                    cy_pos += inc;
-                    ClampValue(cy_pos, -1, 1);
+                    //cy_pos += inc;
+                    //ClampValue(cy_pos, -1, 1);
                 }
 
                 if (event.key.key == 102 /* f */) {
-                    cy_pos -= inc;
-                    ClampValue(cy_pos, -1, 1);
+                    //cy_pos -= inc;
+                    //ClampValue(cy_pos, -1, 1);
                 }
             }
 
             if (event.type == SDL_EVENT_QUIT) {
+                adc_sampler.stop();
+                bcm2835_spi_end();
+                bcm2835_close();
+
                 // Block released ... stop the stream
                 if ( audio.isStreamRunning() )
                     audio.stopStream();  // or could call dac.abortStream();
@@ -667,6 +781,18 @@ int main()
                 done = true;
             }
         }
+
+        uint16_t x_pos_i = adc_sampler.value(0);
+        x_pos = (static_cast<float>(x_pos_i / 1023.f) * 2) - 1;
+
+        uint16_t y_pos_i = adc_sampler.value(1);
+        y_pos = (static_cast<float>(y_pos_i / 1023.f) * 2) - 1;
+
+        uint16_t cx_pos_i = adc_sampler.value(2);
+        cx_pos = (static_cast<float>(cx_pos_i / 1023.f) * 2) - 1;
+
+        uint16_t cy_pos_i = adc_sampler.value(3);
+        cy_pos = (static_cast<float>(cy_pos_i / 1023.f) * 2) - 1;
 
         SDL_SetRenderDrawColor(pRenderer, 0, 0, 0, SDL_ALPHA_OPAQUE);  /* black, full alpha */
         SDL_RenderClear(pRenderer);  /* start with a blank canvas. */
